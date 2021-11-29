@@ -1,0 +1,92 @@
+library(Seurat)
+library(tidyverse)
+library(ggplot2)
+library(SoupX)
+library(Matrix)
+library(dplyr)
+library(stringr)
+library(DropletUtils)
+library(clustree)
+library(patchwork)
+
+set.seed(1)
+
+#Import Current Deafult Seurat Object, lineage.
+
+AllCELLS <- readRDS("")
+DimPlot(AllCELLS)
+
+#Alter Clustering to highlight early cluster, highlight early cluster for subsetting
+DefaultAssay(AllCELLS) <- "integrated"
+AllCELLS <- FindNeighbors(AllCELLS, reduction = "pca", dims = 1:12)
+AllCELLS <- FindClusters(AllCELLS, resolution = 0.5)
+DimPlot(AllCELLS)
+SGonlycells <- WhichCells(AllCELLS, idents = c("0", "1"))
+
+#Switch Assay to SCT for analysis
+DefaultAssay(AllCELLS) <- "SCT"
+Early <- FindMarkers(AllCELLS, ident.1 = "1", ident.2 =c("0"), only.pos = T)
+Earlyclusternames <- rownames(Early)
+
+#Subset specifically early cluster and reintergrate
+srat.data1<- Read10X("/")
+SrcGFP_1 <- CreateSeuratObject(srat.data1, project = "SrcGFP_1")
+
+srat.data2 <- Read10X("/")
+SrcGFP_2 <- CreateSeuratObject(srat.data2, project = "SrcGFP_2")
+
+srat.data3 <- Read10X("/")
+SrcGFP_3 <- CreateSeuratObject(srat.data3, project = "SrcGFP_3")
+
+srat.data4 <- Read10X("/")
+SrcGFP_4 <- CreateSeuratObject(srat.data4, project = "SrcGFP_4")
+
+SrcGFP.combined <- merge(SrcGFP_1, y = c(SrcGFP_2, SrcGFP_3, SrcGFP_4), add.cell.ids = c("SrcGFP1","SrcGFP2","SrcGFP3" ,"SrcGFP4"), project = "SrcGFP")
+
+SrcGFP.combined[["percent.mt"]] <- PercentageFeatureSet(SrcGFP.combined, pattern = "mt:")
+SrcGFP.combined[["percent.ribo"]] <- PercentageFeatureSet(SrcGFP.combined, pattern = "^Rp[LS]")
+SrcGFP.combined <- subset(SrcGFP.combined, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & nCount_RNA <10000 & percent.mt < 10)
+SrcGFP.combined <- subset(SrcGFP.combined, cells = SGonlycells)
+
+
+#IntergrateAnchors
+
+SrcGFP.list <- SplitObject(SrcGFP.combined, split.by = "orig.ident")
+SrcGFP.list <- lapply(X = SrcGFP.list, FUN = SCTransform, vars.to.regress = c("percent.ribo", "percent.mt"))
+features <- SelectIntegrationFeatures(object.list = SrcGFP.list, nfeatures = 2000)
+SrcGFP.list <- PrepSCTIntegration(object.list = SrcGFP.list, anchor.features = features)
+
+SrcGFP.anchors <- FindIntegrationAnchors(object.list = SrcGFP.list, normalization.method = "SCT", 
+                                         anchor.features = features)
+SrcGFP.combined.sct <- IntegrateData(anchorset = SrcGFP.anchors, normalization.method = "SCT")
+
+
+#Run PCA, choose relevant dimention through pcs
+SrcGFP.combined.sct <- RunPCA(SrcGFP.combined.sct)
+pct <- SrcGFP.combined.sct[["pca"]]@stdev / sum(SrcGFP.combined.sct[["pca"]]@stdev) * 100
+cumu <- cumsum(pct)
+co1 <- which(cumu > 90 & pct < 5)[1]
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+pcs <- max(co1, co2)
+pcs
+
+SrcGFP.combined.sct <- RunUMAP(SrcGFP.combined.sct, reduction = "pca", dims = 1:44)
+SrcGFP.combined.sct <- FindNeighbors(SrcGFP.combined.sct, reduction = "pca", dims = 1:44)
+SrcGFP.combined.sct <- FindClusters(SrcGFP.combined.sct, resolution = 0.3)
+DimPlot(SrcGFP.combined.sct)
+
+
+#Generate a folder of UMAPs of top early cluster names plotted on original and new early cluster specific UMAP
+
+setwd(dir = "")
+
+for (i in Earlyclusternames)
+{   
+  allcellplot <- FeaturePlot(AllCELLS, features = i, cols = virpal, pt.size = 2, order = T)
+  SGclusterPlot <- FeaturePlot(SrcGFP.combined.sct, features = i, cols = virpal, pt.size = 5, order = T) + xlim(-10,0) + ylim(-1,6)
+  combinedplot <- allcellplot + SGclusterPlot
+  png(paste(i, ".png", sep = ""), width=1000, height=1200)
+  plot(combinedplot)
+  dev.off() 
+}
+
